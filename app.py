@@ -5,7 +5,6 @@ from Pinecone_class import pincoine_ob
 from langchain_community.chat_models import ChatOpenAI
 from langchain.prompts import ChatPromptTemplate
 from fastapi import FastAPI, File, UploadFile
-import tempfile
 import os
 import uvicorn
 from dotenv import load_dotenv
@@ -47,13 +46,9 @@ async def upload_file(file: UploadFile = File(...)):
     contents = await file.read()
     file_extension = file.filename.split(".")[-1].lower()
 
-    fd, tmp_file_path = tempfile.mkstemp(suffix=f".{file_extension}")
-
-    with os.fdopen(fd, 'wb') as tmp_file:
-        tmp_file.write(contents)
 
     if file_extension == "pdf":
-        chunks = load_split_pdf_file(tmp_file_path)
+        chunks = load_split_pdf_file(contents)
         if not chunks:
             return {"error": "Failed to process the PDF"}
 
