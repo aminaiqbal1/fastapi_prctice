@@ -1,9 +1,18 @@
 from langchain_community.document_loaders import PyMuPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
+import os
+from qdrant_class import qdrant_ob
+from langchain_openai import OpenAIEmbeddings
+from langchain_core.output_parsers import StrOutputParser
+from langchain_core.prompts import PromptTemplate
 from langchain.chat_models import ChatOpenAI
 from langchain.prompts import ChatPromptTemplate
 from operator import itemgetter
-# from app2 import upload_file
+from langchain_core.runnables import  RunnablePassthrough, RunnableParallel
+
+qdrant_api_key = os.getenv("QDRANT_API_KEY")
+qdrant_url = os.getenv("QDRANT_URL")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 
 
@@ -27,52 +36,43 @@ def load_split_pdf_file(file):
 
     # Split the text into smaller chunks
     chunks = text_splitter.split_documents(pages)
-
-
     return chunks 
 
-    
+chunks = load_split_pdf_file()
+embeddings = OpenAIEmbeddings("text-embedding-3-small")
+collection_name = "psgpdf"
+qdrant_ob.insertion(chunks,embeddings = embeddings,collection_name = collection_name )
+qdrant_ob.retrieval(collection_name = collection_name,embeddings = embeddings)
+qdrant_ob.create_collection(collection_name = collection_name)
 
-def QA_Chain_Retrieval(query,vectordb ):
-    try:
-        # Formatting function for documents
-        def format_docs(docs):
-            return "\n\n".join(doc.page_content for doc in docs)
+def Conversational_Chain(query, history):
+        try:
+            template = """you are expert chatbot assistant. you also have user history. Answer questions based on user history.
+            history: {HISTORY}
+            query:{QUESTION}
+            """
+            prompt = ChatPromptTemplate.from_template(template)
+            model = ChatOpenAI(
+                model="gpt-4o-mini", 
+                openai_api_key=os.getenv("OPENAI_API_KEY"), 
+                temperature=0
+                )
 
-        # Prompt template string
-        prompt_str = """
-        Answer the user question based only on the following context:
-        {context}
+            setup = RunnableParallel(
+            {"HISTORY": RunnablePassthrough(), "QUESTION": RunnablePassthrough()}
+            )
 
-        Question: {question}
-        """
+            output_parser = StrOutputParser()
+
+            rag_chain = (
+                setup
+                | prompt
+                | model
+                | output_parser
+            )
+            input_dict = {"QUESTION": query, "HISTORY": history}
+            response = rag_chain.invoke(str(input_dict))
+            return response
         
-        # Create a chat prompt template
-        _prompt = ChatPromptTemplate.from_template(prompt_str)
-        
-        # Set the number of chunks to retrieve
-        num_chunks = 3
-        
-        # Set up the retriever
-        retriever = vectordb.as_retriever(
-            search_type="similarity",
-            search_kwargs={"k": num_chunks}
-        )
-        
-        # Set up the chain components
-        chat_llm = ChatOpenAI(model_name="gpt-4o-mini")
-        query_fetcher = itemgetter("question")
-        setup = {
-            "question": query_fetcher,
-            "context": query_fetcher | retriever | format_docs
-        }
-        
-        # Define the final chain
-        _chain = setup | _prompt | chat_llm
-        
-        # Execute the chain and fetch the response
-        response = _chain.invoke({"question": query})
-        return response
-    
-    except Exception as e:
-        return f"Error executing retrieval chain: {str(e)}"
+        except Exception as e:
+            return f"Error executing conversational retrieval chain: {str(e)}"

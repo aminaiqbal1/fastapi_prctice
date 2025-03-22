@@ -1,75 +1,115 @@
-from fastapi import FastAPI, UploadFile, File
-from typing import Optional
-import base64 #base64: Converts image binary data into a Base64 string
-import requests #requests: Used to fetch the image from a URL
-from openai import OpenAI #OpenAI API client, which allows us to interact with GPT-4
+from fastapi import FastAPI, File, UploadFile
+from utils import Conversational_Chain
+import os
+from langchain_openai import OpenAIEmbeddings
+import uvicorn
+from pydantic import BaseModel
+from conv_ret_db import SessionLocal, ConversationChatHistory
+from langchain_openai import ChatOpenAI
+from langchain_core.prompts.chat import ChatPromptTemplate
+from operator import itemgetter
+import ast
 from fastapi.responses import JSONResponse
-from io import BytesIO
-from PIL import Image
-from transformers import BlipProcessor, BlipForConditionalGeneration
-client = OpenAI()
+from fastapi import status
+
+from dotenv import load_dotenv
+load_dotenv()
+
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+
+Embeddings_model = "text-embedding-3-small"
+
+embeddings = OpenAIEmbeddings(model = Embeddings_model, api_key = OPENAI_API_KEY)
+
 app = FastAPI()
 
-@app.post("/process-image/")
-async def process_image(file: Optional[UploadFile] = File(None)):
+# Updated QueryRequest model
+class QueryRequest(BaseModel):
+    chatbot_id: str
+    query: str
+
+@app.post("/Conversation_chain")
+async def Convo_chain(request: QueryRequest):
+    chatbot_id_user = request.chatbot_id
+    query_user = request.query
+    print("query_user: ", type(query_user))
+    print("Received chatbot_id_user:", chatbot_id_user)
+
+    session = SessionLocal()
     try:
-        # if file.content_type not in ["image/png", "image/jpeg"]:
-        #     return JSONResponse(content={"error": "Invalid file type. Only PNG and JPG are allowed."}, status_code=400)
-        base64_image = encode_image(file.file)
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": "What is in this image?"},
-                        {
-                            "type": "image_url",
-                            "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"},
-                        },
-                    ],
-                }
-            ],
+        # Query the database to find an existing chatbot_id
+        chatbot_id_table = session.query(ConversationChatHistory).filter_by(chatbot_id=chatbot_id_user).first()
+        print(chatbot_id_table)
+        
+        if chatbot_id_table:
+            # Use the existing chatbot_id if found
+            chatbot_id = chatbot_id_table.chatbot_id
+            print(f"Existing chatbot_id found: {chatbot_id}")
+        else:
+            # Generate a new chatbot_id if no record is found
+            chatbot_id = chatbot_id_user
+            print(f"Generated new chatbot_id: {chatbot_id}")
+        
+        conversation_history = session.query(ConversationChatHistory).filter_by(chatbot_id=chatbot_id).order_by(ConversationChatHistory.id.desc()).limit(30).all()
+
+        chat_history = []
+        for chat in conversation_history:
+            if chat.query:
+                chat_history.append(f"User: {chat.query}")
+            if chat.response:
+                chat_history.append(f"AI response: {chat.response}")
+
+        
+        llm_model = ChatOpenAI(model='gpt-4o-mini', openai_api_key=os.getenv("OPENAI_API_KEY"), temperature=0)
+
+        # Greeting check functionality
+        greeting_prompt = """
+            You are an expert in classifying whether the provided user query is related to a greeting or not. 
+            If it is a greeting, classify it as 'yes' and generate a greeting response. 
+            Otherwise, classify it as 'no' and return 'statusCode:404' in greeting_response. 
+            provided user query: {query}
+            
+            The output should be in the format: ["yes/no", "greeting_response"]
+            """
+        greeting_prompt = ChatPromptTemplate.from_template(greeting_prompt)
+
+        query_input = {"query": query_user}
+
+        # Check for greeting
+        greeting_chain = ({"query": itemgetter("query")}  | greeting_prompt | llm_model)
+        greeting_response = greeting_chain.invoke(query_input)
+        response = ast.literal_eval(greeting_response.content)
+        label = response[0]
+
+        if label.lower().endswith("yes"):
+            message = response[1]
+            new_history = ConversationChatHistory(
+                chatbot_id=chatbot_id,
+                query=query_user,
+                response=message
+            )
+            session.add(new_history)
+            session.commit()
+            return JSONResponse(content={"message": "Response Generated Successfully!", "data": message}, status_code=status.HTTP_200_OK)
+
+        # Handle non-greeting queries
+        results = Conversational_Chain(query = query_user, history = chat_history)
+
+        new_history = ConversationChatHistory(
+            chatbot_id=chatbot_id,
+            query=query_user,
+            response=results
         )
-        return response.choices[0].message.content
+        session.add(new_history)
+        session.commit()
 
-     
-    except Exception as e:
-            return JSONResponse(status_code=500, content={"error": f"Failed to process uploaded file: {str(e)}"})
-
-def encode_image(image_file):
-    return base64.b64encode(image_file.read()).decode('utf-8')
+        #return {"message": "Response Generated Successfully", "data": results}
+        return JSONResponse(content={"message": "Response Generated Successfully!", "data": results}, status_code=status.HTTP_200_OK)
 
 
-# huging face 
-@app.post("/process-image-huggingface/")
-async def process_image_huggingface(file: UploadFile = File(...)):
-    # Load the processor and model
-    processor = BlipProcessor.from_pretrained("Salesforce/blip-image-captioning-base")
-    model = BlipForConditionalGeneration.from_pretrained("Salesforce/blip-image-captioning-base")
-
-    # Read image file
-    image_bytes = await file.read()
-    raw_image = Image.open(BytesIO(image_bytes)).convert("RGB")
-
-    # Conditional image captioning
-    text = "a photography of"
-    inputs = processor(raw_image, text, return_tensors="pt")
-    out = model.generate(**inputs)
-    conditional_caption = processor.decode(out[0], skip_special_tokens=True)
-
-    # Unconditional image captioning
-    inputs = processor(raw_image, return_tensors="pt")
-    out = model.generate(**inputs)
-    unconditional_caption = processor.decode(out[0], skip_special_tokens=True)
-
-    # Return response as JSON
-    return JSONResponse({
-        "conditional_caption": conditional_caption,
-        "unconditional_caption": unconditional_caption
-    })
+    finally:
+        session.close()
 
 
 if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run("main:app", host="127.0.0.1", port=8100, reload=True)
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
