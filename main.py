@@ -1,115 +1,110 @@
-from fastapi import FastAPI, File, UploadFile
-from utils import Conversational_Chain
-import os
-from langchain_openai import OpenAIEmbeddings
-import uvicorn
+from models.tabels import Post, User, product   
+from fastapi import FastAPI, Depends, HTTPException
+from sqlalchemy.orm import Session
 from pydantic import BaseModel
-from conv_ret_db import SessionLocal, ConversationChatHistory
-from langchain_openai import ChatOpenAI
-from langchain_core.prompts.chat import ChatPromptTemplate
-from operator import itemgetter
-import ast
-from fastapi.responses import JSONResponse
-from fastapi import status
+from config.database import get_db, engine, SessionLocal,Base
+Base.metadata.create_all(bind=engine)
 
-from dotenv import load_dotenv
-load_dotenv()
-
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-
-Embeddings_model = "text-embedding-3-small"
-
-embeddings = OpenAIEmbeddings(model = Embeddings_model, api_key = OPENAI_API_KEY)
 
 app = FastAPI()
 
-# Updated QueryRequest model
-class QueryRequest(BaseModel):
-    chatbot_id: str
-    query: str
+class PostCreate(BaseModel):
+    
+    tittle: str = None
+    name: str = None
+    user_id: int = None
+class PostResponse(PostCreate):
+    id: int
+    class Config:
+        orm_mode = True
 
-@app.post("/Conversation_chain")
-async def Convo_chain(request: QueryRequest):
-    chatbot_id_user = request.chatbot_id
-    query_user = request.query
-    print("query_user: ", type(query_user))
-    print("Received chatbot_id_user:", chatbot_id_user)
+class user_create(BaseModel):
+    id: int
+    gmail: str = None
+    password: str = None
 
-    session = SessionLocal()
+    class Config:
+        orm_mode = True
+@app.post("/users/")
+def create_user(user: user_create, db: Session = Depends(get_db)):
     try:
-        # Query the database to find an existing chatbot_id
-        chatbot_id_table = session.query(ConversationChatHistory).filter_by(chatbot_id=chatbot_id_user).first()
-        print(chatbot_id_table)
-        
-        if chatbot_id_table:
-            # Use the existing chatbot_id if found
-            chatbot_id = chatbot_id_table.chatbot_id
-            print(f"Existing chatbot_id found: {chatbot_id}")
-        else:
-            # Generate a new chatbot_id if no record is found
-            chatbot_id = chatbot_id_user
-            print(f"Generated new chatbot_id: {chatbot_id}")
-        
-        conversation_history = session.query(ConversationChatHistory).filter_by(chatbot_id=chatbot_id).order_by(ConversationChatHistory.id.desc()).limit(30).all()
-
-        chat_history = []
-        for chat in conversation_history:
-            if chat.query:
-                chat_history.append(f"User: {chat.query}")
-            if chat.response:
-                chat_history.append(f"AI response: {chat.response}")
-
-        
-        llm_model = ChatOpenAI(model='gpt-4o-mini', openai_api_key=os.getenv("OPENAI_API_KEY"), temperature=0)
-
-        # Greeting check functionality
-        greeting_prompt = """
-            You are an expert in classifying whether the provided user query is related to a greeting or not. 
-            If it is a greeting, classify it as 'yes' and generate a greeting response. 
-            Otherwise, classify it as 'no' and return 'statusCode:404' in greeting_response. 
-            provided user query: {query}
-            
-            The output should be in the format: ["yes/no", "greeting_response"]
-            """
-        greeting_prompt = ChatPromptTemplate.from_template(greeting_prompt)
-
-        query_input = {"query": query_user}
-
-        # Check for greeting
-        greeting_chain = ({"query": itemgetter("query")}  | greeting_prompt | llm_model)
-        greeting_response = greeting_chain.invoke(query_input)
-        response = ast.literal_eval(greeting_response.content)
-        label = response[0]
-
-        if label.lower().endswith("yes"):
-            message = response[1]
-            new_history = ConversationChatHistory(
-                chatbot_id=chatbot_id,
-                query=query_user,
-                response=message
-            )
-            session.add(new_history)
-            session.commit()
-            return JSONResponse(content={"message": "Response Generated Successfully!", "data": message}, status_code=status.HTTP_200_OK)
-
-        # Handle non-greeting queries
-        results = Conversational_Chain(query = query_user, history = chat_history)
-
-        new_history = ConversationChatHistory(
-            chatbot_id=chatbot_id,
-            query=query_user,
-            response=results
-        )
-        session.add(new_history)
-        session.commit()
-
-        #return {"message": "Response Generated Successfully", "data": results}
-        return JSONResponse(content={"message": "Response Generated Successfully!", "data": results}, status_code=status.HTTP_200_OK)
+        db_user = User(gmail=user.gmail, password=user.password)
+        db.add(db_user)
+        db.commit()
+        db.refresh(db_user)
+        return {"data" :db_user,
+                "message": "User created successfully",
+                "status": True}
+    except Exception as e:
+        return {"message": "User not created",
+                "status": False,
+                "error": str(e)}
+@app.post("/posts/{user_id}")
+def create_post(user_id,chack: PostCreate, db: Session = Depends(get_db)):
+    try:
+        db_post = Post(tittle=chack.tittle, name=chack.name, user_id=chack.user_id)
+        db.add(db_post)
+        db.commit()
+        db.refresh(db_post)
+        return {"data" :db_post,
+                "message": "Post created successfully",
+                "status": True}
+    except Exception as e:
+        return {"message": "Post not created",
+                "status": False,
+                "error": str(e)}
 
 
-    finally:
-        session.close()
+# Read All Users
+@app.get("on/posts/")
+def get_posts( db= Depends(get_db)):
+    return db.query(Post).all()
+# Read User by ID
+@app.get("/users/{post_id}")
+def get_user(post_id: int, db= Depends(get_db)):
+    return db.query(Post).filter(Post.id == post_id).first()
 
+from models.tabels import product
+# @app.post("startup")
+# def startup_event():
+#     db = SessionLocal()
+#     # Check if already data exists
+#     if db.query(product).count() == 0:
+#         products = [
+#             product(name="Laptop", description="A high-performance laptop with 16GB RAM", price=1200.0),
+#             product(name="Smartphone", description="Latest model with 5G support", price=799.0),
+#             product(name="Headphones", description="Noise-cancelling wireless headphones", price=150.0),
+#             product(name="Keyboard", description="Mechanical keyboard with RGB lighting", price=90.0)
+#         ]
+#         db.add_all(products)
+#         db.commit()
+#     db.close() 
+
+# from fastapi import FastAPI
+# from models import SessionLocal, Product
+
+app = FastAPI()
+
+@app.post("startup")
+def add_data():
+    db = SessionLocal()
+    # Agar products table mein koi data nahi hai to insert karo
+    if db.query(product).count() == 0:
+        products = [
+            product(name="Laptop", description="A high-performance laptop with 16GB RAM", price=1200.0),
+            product(name="Smartphone", description="Latest model with 5G support", price=799.0),
+            product(name="Headphones", description="Noise-cancelling wireless headphones", price=150.0),
+            product(name="Keyboard", description="Mechanical keyboard with RGB lighting", price=90.0)
+        ]
+        db.add_all(products)
+        db.commit()
+    db.close()
 
 if __name__ == "__main__":
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+    import uvicorn
+    uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=True)
+# this command is use for createing and changeing for every table, column, 
+
+# alembic revision --autogenerate -m "create new column user_id in posts table"
+# alembic upgrade head
+# alembic revision --autogenerate -m "make relationship of Users with  posts table"
